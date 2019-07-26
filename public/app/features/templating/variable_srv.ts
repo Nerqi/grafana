@@ -1,46 +1,32 @@
-// Libaries
-import angular, { IQService, ILocationService, auto, IPromise } from 'angular';
+import angular from 'angular';
 import _ from 'lodash';
-
-// Utils & Services
 import coreModule from 'app/core/core_module';
 import { variableTypes } from './variable';
-import { Graph } from 'app/core/utils/dag';
-import { TemplateSrv } from 'app/features/templating/template_srv';
-import { TimeSrv } from 'app/features/dashboard/services/TimeSrv';
-import { DashboardModel } from 'app/features/dashboard/state/DashboardModel';
-
-// Types
-import { TimeRange } from '@grafana/data';
 
 export class VariableSrv {
-  dashboard: DashboardModel;
-  variables: any[];
+  dashboard: any;
+  variables: any;
 
   /** @ngInject */
-  constructor(
-    private $q: IQService,
-    private $location: ILocationService,
-    private $injector: auto.IInjectorService,
-    private templateSrv: TemplateSrv,
-    private timeSrv: TimeSrv
-  ) {}
+  constructor(private $rootScope, private $q, private $location, private $injector, private templateSrv) {
+    // update time variant variables
+    $rootScope.$on('refresh', this.onDashboardRefresh.bind(this), $rootScope);
+    $rootScope.$on('template-variable-value-updated', this.updateUrlParamsWithCurrentVariables.bind(this), $rootScope);
+  }
 
-  init(dashboard: DashboardModel) {
+  init(dashboard) {
     this.dashboard = dashboard;
-    this.dashboard.events.on('time-range-updated', this.onTimeRangeUpdated.bind(this));
-    this.dashboard.events.on('template-variable-value-updated', this.updateUrlParamsWithCurrentVariables.bind(this));
 
     // create working class models representing variables
     this.variables = dashboard.templating.list = dashboard.templating.list.map(this.createVariableFromModel.bind(this));
-    this.templateSrv.init(this.variables, this.timeSrv.timeRange());
+    this.templateSrv.init(this.variables);
 
     // init variables
-    for (const variable of this.variables) {
+    for (let variable of this.variables) {
       variable.initLock = this.$q.defer();
     }
 
-    const queryParams = this.$location.search();
+    var queryParams = this.$location.search();
     return this.$q
       .all(
         this.variables.map(variable => {
@@ -48,33 +34,28 @@ export class VariableSrv {
         })
       )
       .then(() => {
-        this.templateSrv.updateIndex();
+        this.templateSrv.updateTemplateData();
       });
   }
 
-  onTimeRangeUpdated(timeRange: TimeRange) {
-    this.templateSrv.updateTimeRange(timeRange);
-    const promises = this.variables
-      .filter(variable => variable.refresh === 2)
-      .map(variable => {
-        const previousOptions = variable.options.slice();
+  onDashboardRefresh() {
+    var promises = this.variables.filter(variable => variable.refresh === 2).map(variable => {
+      var previousOptions = variable.options.slice();
 
-        return variable.updateOptions().then(() => {
-          if (angular.toJson(previousOptions) !== angular.toJson(variable.options)) {
-            this.dashboard.templateVariableValueUpdated();
-          }
-        });
+      return variable.updateOptions().then(() => {
+        if (angular.toJson(previousOptions) !== angular.toJson(variable.options)) {
+          this.$rootScope.$emit('template-variable-value-updated');
+        }
       });
-
-    return this.$q.all(promises).then(() => {
-      this.dashboard.startRefresh();
     });
+
+    return this.$q.all(promises);
   }
 
-  processVariable(variable: any, queryParams: any) {
-    const dependencies = [];
+  processVariable(variable, queryParams) {
+    var dependencies = [];
 
-    for (const otherVariable of this.variables) {
+    for (let otherVariable of this.variables) {
       if (variable.dependsOn(otherVariable)) {
         dependencies.push(otherVariable.initLock.promise);
       }
@@ -83,7 +64,7 @@ export class VariableSrv {
     return this.$q
       .all(dependencies)
       .then(() => {
-        const urlValue = queryParams['var-' + variable.name];
+        var urlValue = queryParams['var-' + variable.name];
         if (urlValue !== void 0) {
           return variable.setValueFromUrl(urlValue).then(variable.initLock.resolve);
         }
@@ -100,62 +81,63 @@ export class VariableSrv {
       });
   }
 
-  createVariableFromModel(model: any) {
-    // @ts-ignore
-    const ctor = variableTypes[model.type].ctor;
+  createVariableFromModel(model) {
+    var ctor = variableTypes[model.type].ctor;
     if (!ctor) {
       throw {
         message: 'Unable to find variable constructor for ' + model.type,
       };
     }
 
-    const variable = this.$injector.instantiate(ctor, { model: model });
+    var variable = this.$injector.instantiate(ctor, { model: model });
     return variable;
   }
 
-  addVariable(variable: any) {
+  addVariable(variable) {
     this.variables.push(variable);
-    this.templateSrv.updateIndex();
+    this.templateSrv.updateTemplateData();
     this.dashboard.updateSubmenuVisibility();
   }
 
-  removeVariable(variable: any) {
-    const index = _.indexOf(this.variables, variable);
+  removeVariable(variable) {
+    var index = _.indexOf(this.variables, variable);
     this.variables.splice(index, 1);
-    this.templateSrv.updateIndex();
+    this.templateSrv.updateTemplateData();
     this.dashboard.updateSubmenuVisibility();
   }
 
-  updateOptions(variable: any) {
+  updateOptions(variable) {
     return variable.updateOptions();
   }
 
-  variableUpdated(variable: any, emitChangeEvents?: any) {
+  variableUpdated(variable, emitChangeEvents?) {
     // if there is a variable lock ignore cascading update because we are in a boot up scenario
     if (variable.initLock) {
       return this.$q.when();
     }
 
-    const g = this.createGraph();
-    const node = g.getNode(variable.name);
-    let promises = [];
-    if (node) {
-      promises = node.getOptimizedInputEdges().map(e => {
-        return this.updateOptions(this.variables.find(v => v.name === e.inputNode.name));
-      });
-    }
+    // cascade updates to variables that use this variable
+    var promises = _.map(this.variables, otherVariable => {
+      if (otherVariable === variable) {
+        return;
+      }
+
+      if (otherVariable.dependsOn(variable)) {
+        return this.updateOptions(otherVariable);
+      }
+    });
 
     return this.$q.all(promises).then(() => {
       if (emitChangeEvents) {
-        this.dashboard.templateVariableValueUpdated();
-        this.dashboard.startRefresh();
+        this.$rootScope.$emit('template-variable-value-updated');
+        this.$rootScope.$broadcast('refresh');
       }
     });
   }
 
-  selectOptionsForCurrentValue(variable: any) {
-    let i, y, value, option;
-    const selected: any = [];
+  selectOptionsForCurrentValue(variable) {
+    var i, y, value, option;
+    var selected: any = [];
 
     for (i = 0; i < variable.options.length; i++) {
       option = variable.options[i];
@@ -177,31 +159,31 @@ export class VariableSrv {
     return selected;
   }
 
-  validateVariableSelectionState(variable: any) {
+  validateVariableSelectionState(variable) {
     if (!variable.current) {
       variable.current = {};
     }
 
     if (_.isArray(variable.current.value)) {
-      let selected = this.selectOptionsForCurrentValue(variable);
+      var selected = this.selectOptionsForCurrentValue(variable);
 
       // if none pick first
       if (selected.length === 0) {
         selected = variable.options[0];
       } else {
         selected = {
-          value: _.map(selected, val => {
+          value: _.map(selected, function(val) {
             return val.value;
           }),
-          text: _.map(selected, val => {
+          text: _.map(selected, function(val) {
             return val.text;
-          }),
+          }).join(' + '),
         };
       }
 
       return variable.setValue(selected);
     } else {
-      const currentOption: any = _.find(variable.options, {
+      var currentOption = _.find(variable.options, {
         text: variable.current.text,
       });
       if (currentOption) {
@@ -215,67 +197,45 @@ export class VariableSrv {
     }
   }
 
-  /**
-   * Sets the current selected option (or options) based on the query params in the url. It is possible for values
-   * in the url to not match current options of the variable. In that case the variables current value will be still set
-   * to that value.
-   * @param variable Instance of Variable
-   * @param urlValue Value of the query parameter
-   */
-  setOptionFromUrl(variable: any, urlValue: string | string[]): IPromise<any> {
-    let promise = this.$q.when();
+  setOptionFromUrl(variable, urlValue) {
+    var promise = this.$q.when();
 
     if (variable.refresh) {
       promise = variable.updateOptions();
     }
 
     return promise.then(() => {
-      // Simple case. Value in url matches existing options text or value.
-      let option: any = _.find(variable.options, op => {
+      var option = _.find(variable.options, op => {
         return op.text === urlValue || op.value === urlValue;
       });
 
-      // No luck either it is array or value does not exist in the variables options.
-      if (!option) {
-        let defaultText = urlValue;
-        const defaultValue = urlValue;
+      let defaultText = urlValue;
+      let defaultValue = urlValue;
 
-        if (_.isArray(urlValue)) {
-          // Multiple values in the url. We construct text as a list of texts from all matched options.
-          defaultText = urlValue.reduce((acc, item) => {
-            const t: any = _.find(variable.options, { value: item });
-            if (t) {
-              acc.push(t.text);
-            } else {
-              acc.push(item);
-            }
+      if (!option && _.isArray(urlValue)) {
+        defaultText = [];
 
-            return acc;
-          }, []);
+        for (let n = 0; n < urlValue.length; n++) {
+          let t = _.find(variable.options, op => {
+            return op.value === urlValue[n];
+          });
+
+          if (t) {
+            defaultText.push(t.text);
+          }
         }
-
-        // It is possible that we did not match the value to any existing option. In that case the url value will be
-        // used anyway for both text and value.
-        option = { text: defaultText, value: defaultValue };
       }
 
-      if (variable.multi) {
-        // In case variable is multiple choice, we cast to array to preserve the same behaviour as when selecting
-        // the option directly, which will return even single value in an array.
-        option = { text: _.castArray(option.text), value: _.castArray(option.value) };
-      }
-
+      option = option || { text: defaultText, value: defaultValue };
       return variable.setValue(option);
     });
   }
 
-  setOptionAsCurrent(variable: any, option: any) {
+  setOptionAsCurrent(variable, option) {
     variable.current = _.cloneDeep(option);
 
-    if (_.isArray(variable.current.text) && variable.current.text.length > 0) {
+    if (_.isArray(variable.current.text)) {
       variable.current.text = variable.current.text.join(' + ');
-    } else if (_.isArray(variable.current.value) && variable.current.value[0] !== '$__all') {
-      variable.current.text = variable.current.value.join(' + ');
     }
 
     this.selectOptionsForCurrentValue(variable);
@@ -284,10 +244,10 @@ export class VariableSrv {
 
   updateUrlParamsWithCurrentVariables() {
     // update url
-    const params = this.$location.search();
+    var params = this.$location.search();
 
     // remove variable params
-    _.each(params, (value, key) => {
+    _.each(params, function(value, key) {
       if (key.indexOf('var-') === 0) {
         delete params[key];
       }
@@ -299,11 +259,11 @@ export class VariableSrv {
     this.$location.search(params);
   }
 
-  setAdhocFilter(options: any) {
-    let variable: any = _.find(this.variables, {
+  setAdhocFilter(options) {
+    var variable = _.find(this.variables, {
       type: 'adhoc',
       datasource: options.datasource,
-    } as any);
+    });
     if (!variable) {
       variable = this.createVariableFromModel({
         name: 'Filters',
@@ -313,8 +273,8 @@ export class VariableSrv {
       this.addVariable(variable);
     }
 
-    const filters = variable.filters;
-    let filter: any = _.find(filters, { key: options.key, value: options.value });
+    let filters = variable.filters;
+    let filter = _.find(filters, { key: options.key, value: options.value });
 
     if (!filter) {
       filter = { key: options.key, value: options.value };
@@ -323,28 +283,6 @@ export class VariableSrv {
 
     filter.operator = options.operator;
     this.variableUpdated(variable, true);
-  }
-
-  createGraph() {
-    const g = new Graph();
-
-    this.variables.forEach(v => {
-      g.createNode(v.name);
-    });
-
-    this.variables.forEach(v1 => {
-      this.variables.forEach(v2 => {
-        if (v1 === v2) {
-          return;
-        }
-
-        if (v1.dependsOn(v2)) {
-          g.link(v1.name, v2.name);
-        }
-      });
-    });
-
-    return g;
   }
 }
 

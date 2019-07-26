@@ -1,21 +1,21 @@
 import _ from 'lodash';
 
 export default class ResponseParser {
-  parse(query: string, results: { results: any }) {
+  parse(query, results) {
     if (!results || results.results.length === 0) {
       return [];
     }
 
-    const influxResults = results.results[0];
+    var influxResults = results.results[0];
     if (!influxResults.series) {
       return [];
     }
 
-    const normalizedQuery = query.toLowerCase();
-    const isValueFirst =
+    var normalizedQuery = query.toLowerCase();
+    var isValueFirst =
       normalizedQuery.indexOf('show field keys') >= 0 || normalizedQuery.indexOf('show retention policies') >= 0;
 
-    const res = {};
+    var res = {};
     _.each(influxResults.series, serie => {
       _.each(serie.values, value => {
         if (_.isArray(value)) {
@@ -44,14 +44,12 @@ export default class ResponseParser {
       });
     });
 
-    // @ts-ignore problems with typings for this _.map only accepts [] but this needs to be object
     return _.map(res, value => {
-      // @ts-ignore
       return { text: value.toString() };
     });
   }
 }
 
-function addUnique(arr: { [x: string]: any }, value: string | number) {
+function addUnique(arr, value) {
   arr[value] = value;
 }

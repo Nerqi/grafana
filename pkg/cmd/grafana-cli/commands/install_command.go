@@ -14,14 +14,12 @@ import (
 	"strings"
 
 	"github.com/fatih/color"
-	"github.com/grafana/grafana/pkg/cmd/grafana-cli/utils"
-
 	"github.com/grafana/grafana/pkg/cmd/grafana-cli/logger"
 	m "github.com/grafana/grafana/pkg/cmd/grafana-cli/models"
 	s "github.com/grafana/grafana/pkg/cmd/grafana-cli/services"
 )
 
-func validateInput(c utils.CommandLine, pluginFolder string) error {
+func validateInput(c CommandLine, pluginFolder string) error {
 	arg := c.Args().First()
 	if arg == "" {
 		return errors.New("please specify plugin to install")
@@ -47,7 +45,7 @@ func validateInput(c utils.CommandLine, pluginFolder string) error {
 	return nil
 }
 
-func installCommand(c utils.CommandLine) error {
+func installCommand(c CommandLine) error {
 	pluginFolder := c.PluginDirectory()
 	if err := validateInput(c, pluginFolder); err != nil {
 		return err
@@ -59,9 +57,7 @@ func installCommand(c utils.CommandLine) error {
 	return InstallPlugin(pluginToInstall, version, c)
 }
 
-// InstallPlugin downloads the plugin code as a zip file from the Grafana.com API
-// and then extracts the zip into the plugins directory.
-func InstallPlugin(pluginName, version string, c utils.CommandLine) error {
+func InstallPlugin(pluginName, version string, c CommandLine) error {
 	pluginFolder := c.PluginDirectory()
 	downloadURL := c.PluginURL()
 	if downloadURL == "" {
@@ -85,7 +81,7 @@ func InstallPlugin(pluginName, version string, c utils.CommandLine) error {
 	}
 
 	logger.Infof("installing %v @ %v\n", pluginName, version)
-	logger.Infof("from: %v\n", downloadURL)
+	logger.Infof("from url: %v\n", downloadURL)
 	logger.Infof("into: %v\n", pluginFolder)
 	logger.Info("\n")
 
@@ -116,7 +112,7 @@ func SelectVersion(plugin m.Plugin, version string) (m.Version, error) {
 		}
 	}
 
-	return m.Version{}, errors.New("Could not find the version you're looking for")
+	return m.Version{}, errors.New("Could not find the version your looking for")
 }
 
 func RemoveGitBuildFromName(pluginName, filename string) string {
@@ -137,7 +133,7 @@ func downloadFile(pluginName, filePath, url string) (err error) {
 			} else {
 				failure := fmt.Sprintf("%v", r)
 				if failure == "runtime error: makeslice: len out of range" {
-					err = fmt.Errorf("Corrupt http response from source. Please try again")
+					err = fmt.Errorf("Corrupt http response from source. Please try again.\n")
 				} else {
 					panic(r)
 				}
@@ -145,30 +141,17 @@ func downloadFile(pluginName, filePath, url string) (err error) {
 		}
 	}()
 
-	var bytes []byte
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-	if _, err := os.Stat(url); err == nil {
-		bytes, err = ioutil.ReadFile(url)
-		if err != nil {
-			return err
-		}
-	} else {
-		resp, err := http.Get(url) // #nosec
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-
-		bytes, err = ioutil.ReadAll(resp.Body)
-		if err != nil {
-			return err
-		}
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
 	}
 
-	return extractFiles(bytes, pluginName, filePath)
-}
-
-func extractFiles(body []byte, pluginName string, filePath string) error {
 	r, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
 	if err != nil {
 		return err
@@ -177,19 +160,13 @@ func extractFiles(body []byte, pluginName string, filePath string) error {
 		newFile := path.Join(filePath, RemoveGitBuildFromName(pluginName, zf.Name))
 
 		if zf.FileInfo().IsDir() {
-			err := os.Mkdir(newFile, 0755)
-			if permissionsError(err) {
+			err := os.Mkdir(newFile, 0777)
+			if PermissionsError(err) {
 				return fmt.Errorf(permissionsDeniedMessage, newFile)
 			}
 		} else {
-			fileMode := zf.Mode()
-
-			if strings.HasSuffix(newFile, "_linux_amd64") || strings.HasSuffix(newFile, "_darwin_amd64") {
-				fileMode = os.FileMode(0755)
-			}
-
-			dst, err := os.OpenFile(newFile, os.O_RDWR|os.O_CREATE|os.O_TRUNC, fileMode)
-			if permissionsError(err) {
+			dst, err := os.Create(newFile)
+			if PermissionsError(err) {
 				return fmt.Errorf(permissionsDeniedMessage, newFile)
 			}
 
@@ -207,6 +184,6 @@ func extractFiles(body []byte, pluginName string, filePath string) error {
 	return nil
 }
 
-func permissionsError(err error) bool {
+func PermissionsError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "permission denied")
 }

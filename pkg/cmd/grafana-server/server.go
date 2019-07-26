@@ -12,33 +12,31 @@ import (
 	"time"
 
 	"github.com/facebookgo/inject"
+	"github.com/grafana/grafana/pkg/bus"
+	"github.com/grafana/grafana/pkg/middleware"
+	"github.com/grafana/grafana/pkg/registry"
+
 	"golang.org/x/sync/errgroup"
 
 	"github.com/grafana/grafana/pkg/api"
-	"github.com/grafana/grafana/pkg/api/routing"
-	"github.com/grafana/grafana/pkg/bus"
-	_ "github.com/grafana/grafana/pkg/extensions"
-	"github.com/grafana/grafana/pkg/infra/localcache"
-	"github.com/grafana/grafana/pkg/infra/log"
-	_ "github.com/grafana/grafana/pkg/infra/metrics"
-	_ "github.com/grafana/grafana/pkg/infra/remotecache"
-	_ "github.com/grafana/grafana/pkg/infra/serverlock"
-	_ "github.com/grafana/grafana/pkg/infra/tracing"
-	_ "github.com/grafana/grafana/pkg/infra/usagestats"
+	"github.com/grafana/grafana/pkg/log"
 	"github.com/grafana/grafana/pkg/login"
-	"github.com/grafana/grafana/pkg/login/social"
-	"github.com/grafana/grafana/pkg/middleware"
+	"github.com/grafana/grafana/pkg/setting"
+
+	"github.com/grafana/grafana/pkg/social"
+
+	// self registering services
+	_ "github.com/grafana/grafana/pkg/extensions"
+	_ "github.com/grafana/grafana/pkg/metrics"
 	_ "github.com/grafana/grafana/pkg/plugins"
-	"github.com/grafana/grafana/pkg/registry"
 	_ "github.com/grafana/grafana/pkg/services/alerting"
-	_ "github.com/grafana/grafana/pkg/services/auth"
 	_ "github.com/grafana/grafana/pkg/services/cleanup"
 	_ "github.com/grafana/grafana/pkg/services/notifications"
 	_ "github.com/grafana/grafana/pkg/services/provisioning"
 	_ "github.com/grafana/grafana/pkg/services/rendering"
 	_ "github.com/grafana/grafana/pkg/services/search"
 	_ "github.com/grafana/grafana/pkg/services/sqlstore"
-	"github.com/grafana/grafana/pkg/setting"
+	_ "github.com/grafana/grafana/pkg/tracing"
 )
 
 func NewGrafanaServer() *GrafanaServerImpl {
@@ -63,12 +61,11 @@ type GrafanaServerImpl struct {
 	shutdownReason     string
 	shutdownInProgress bool
 
-	RouteRegister routing.RouteRegister `inject:""`
-	HttpServer    *api.HTTPServer       `inject:""`
+	RouteRegister api.RouteRegister `inject:""`
+	HttpServer    *api.HTTPServer   `inject:""`
 }
 
 func (g *GrafanaServerImpl) Run() error {
-	var err error
 	g.loadConfiguration()
 	g.writePIDFile()
 
@@ -76,38 +73,19 @@ func (g *GrafanaServerImpl) Run() error {
 	social.NewOAuthService()
 
 	serviceGraph := inject.Graph{}
-	err = serviceGraph.Provide(&inject.Object{Value: bus.GetBus()})
-	if err != nil {
-		return fmt.Errorf("Failed to provide object to the graph: %v", err)
-	}
-	err = serviceGraph.Provide(&inject.Object{Value: g.cfg})
-	if err != nil {
-		return fmt.Errorf("Failed to provide object to the graph: %v", err)
-	}
-	err = serviceGraph.Provide(&inject.Object{Value: routing.NewRouteRegister(middleware.RequestMetrics, middleware.RequestTracing)})
-	if err != nil {
-		return fmt.Errorf("Failed to provide object to the graph: %v", err)
-	}
-	err = serviceGraph.Provide(&inject.Object{Value: localcache.New(5*time.Minute, 10*time.Minute)})
-	if err != nil {
-		return fmt.Errorf("Failed to provide object to the graph: %v", err)
-	}
+	serviceGraph.Provide(&inject.Object{Value: bus.GetBus()})
+	serviceGraph.Provide(&inject.Object{Value: g.cfg})
+	serviceGraph.Provide(&inject.Object{Value: api.NewRouteRegister(middleware.RequestMetrics, middleware.RequestTracing)})
 
 	// self registered services
 	services := registry.GetServices()
 
 	// Add all services to dependency graph
 	for _, service := range services {
-		err = serviceGraph.Provide(&inject.Object{Value: service.Instance})
-		if err != nil {
-			return fmt.Errorf("Failed to provide object to the graph: %v", err)
-		}
+		serviceGraph.Provide(&inject.Object{Value: service.Instance})
 	}
 
-	err = serviceGraph.Provide(&inject.Object{Value: g})
-	if err != nil {
-		return fmt.Errorf("Failed to provide object to the graph: %v", err)
-	}
+	serviceGraph.Provide(&inject.Object{Value: g})
 
 	// Inject dependencies to services
 	if err := serviceGraph.Populate(); err != nil {
@@ -180,7 +158,7 @@ func (g *GrafanaServerImpl) loadConfiguration() {
 		os.Exit(1)
 	}
 
-	g.log.Info("Starting "+setting.ApplicationName, "version", version, "commit", commit, "branch", buildBranch, "compiled", time.Unix(setting.BuildStamp, 0))
+	g.log.Info("Starting "+setting.ApplicationName, "version", version, "commit", commit, "compiled", time.Unix(setting.BuildStamp, 0))
 	g.cfg.LogConfigSources()
 }
 
@@ -196,7 +174,7 @@ func (g *GrafanaServerImpl) Shutdown(reason string) {
 	g.childRoutines.Wait()
 }
 
-func (g *GrafanaServerImpl) Exit(reason error) int {
+func (g *GrafanaServerImpl) Exit(reason error) {
 	// default exit code is 1
 	code := 1
 
@@ -206,7 +184,9 @@ func (g *GrafanaServerImpl) Exit(reason error) int {
 	}
 
 	g.log.Error("Server shutdown", "reason", reason)
-	return code
+
+	log.Close()
+	os.Exit(code)
 }
 
 func (g *GrafanaServerImpl) writePIDFile() {
@@ -235,7 +215,7 @@ func sendSystemdNotification(state string) error {
 	notifySocket := os.Getenv("NOTIFY_SOCKET")
 
 	if notifySocket == "" {
-		return fmt.Errorf("NOTIFY_SOCKET environment variable empty or unset")
+		return fmt.Errorf("NOTIFY_SOCKET environment variable empty or unset.")
 	}
 
 	socketAddr := &net.UnixAddr{
